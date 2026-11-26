@@ -632,25 +632,25 @@ def _gtx(texts):
     return out
 
 
-# ---------------- AI 요약 (GitHub Models, 무료) ----------------
+# ---------------- AI (Gemini 무료 키) ----------------
 GEM_MODELS = [m for m in [os.environ.get('AI_MODEL'), 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash-lite',
                              'gemini-flash-lite-latest'] if m]
 GEM_OK = []   # 이번 실행에서 성공한 모델 (다음 호출에 먼저 사용)
 
 
-def ai_chat(prompt, max_tokens=4000):
+def ai_chat(prompt, max_tokens=4000, sysmsg=None, temp=0.3):
     """AI 요약 (선택). 무료 Gemini API 키(GEMINI_API_KEY)가 있으면 사용, 없으면 None."""
     key = os.environ.get('GEMINI_API_KEY', '').strip()
     if not key:
         return None
-    sysmsg = ('너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 주어진 자료에 있는 사실만 쓰고, 숫자나 사실을 지어내지 마. '
-              '과장하지 말고 투자 권유는 하지 마. 자연스러운 한국어 뉴스 문체로 쓰고, 반드시 JSON만 출력해.')
+    sysmsg = sysmsg or ('너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 주어진 자료에 있는 사실만 쓰고, 숫자나 사실을 지어내지 마. '
+                        '과장하지 말고 투자 권유는 하지 마. 자연스러운 한국어 뉴스 문체로 쓰고, 반드시 JSON만 출력해.')
     tried = set()
     for model in GEM_OK + GEM_MODELS:
         if model in tried:
             continue
         tried.add(model)
-        gc = {'temperature': 0.3, 'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}
+        gc = {'temperature': temp, 'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}
         if '2.5' in model:
             gc['thinkingConfig'] = {'thinkingBudget': 0}   # 빠르게 (생각 단계 끄기)
         body = {'systemInstruction': {'parts': [{'text': sysmsg}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}], 'generationConfig': gc}
@@ -887,6 +887,245 @@ JSON으로만 답해:
     return notes
 
 
+# ======================================================================
+#  Daily Up — 💬 Talk Pick (영어 한 문장) + 🥄 AI 한 스푼 (하루 1번, 아침 6시 기준)
+# ======================================================================
+TALK_THEMES = [('daily', '☕ 일상'), ('work', '💼 일·커리어'), ('money', '💰 돈·경제'), ('travel', '✈️ 여행'), ('food', '🍜 음식'),
+               ('people', '👥 관계'), ('tech', '📱 기술·AI'), ('health', '🧘 건강·습관'), ('culture', '🎬 문화·취미'),
+               ('society', '🌏 사회'), ('family', '🏡 가족·육아'), ('whatif', '🤔 상상')]
+TALK_TYPES = ['가정 (If you could ~ / What would you do if ~)', '의견 (Do you think ~ / How do you feel about ~)',
+              '경험 (Tell me about a time ~ / What was the last time ~)', '선택·비교 (Would you rather ~ / Which matters more ~)',
+              '조언 (What advice would you give ~)', '설명 (What makes ~ / How would you explain ~)',
+              '딜레마 (Is it ever okay to ~ / Where do you draw the line ~)']
+TALK_SYS = ("너는 한국 성인 학습자를 가르치는 원어민 수준의 영어 회화 코치야. 영어는 원어민이 실제로 쓰는 자연스럽고 정확한 표현으로, "
+            "한국어 설명은 친근하고 쉬운 '~해요'체로 써. 반드시 JSON만 출력해.")
+TIP_SYS = ("너는 누구나 AI를 잘 쓰도록 돕는 친절하고 정확한 AI 활용 코치야. 확인되지 않은 기능이나 수치를 지어내지 말고, "
+           "과장 없이 쉬운 말과 구체적인 예시로 '~해요'체로 써. 반드시 JSON만 출력해.")
+TIP_CATS = {'prompt': '🧩 프롬프트', 'use': '🛠️ 생활 활용', 'work': '💼 업무 활용', 'concept': '🧠 원리', 'safety': '🛡️ 안전', 'tool': '🧰 도구'}
+TIP_SEEDS = [
+    ('입문', 'concept', 'AI 챗봇은 어떻게 답을 만들까? (다음 단어 예측과 그 한계)'),
+    ('입문', 'prompt', '좋은 질문의 3요소: 목적·맥락·원하는 형식'),
+    ('활용', 'use', '긴 글·PDF를 요약시킬 때 원하는 결과를 얻는 법'),
+    ('입문', 'safety', 'AI에 넣으면 안 되는 정보 (개인정보·회사 기밀)'),
+    ('활용', 'prompt', 'AI에게 역할(전문가·선생님·면접관)을 주면 답이 달라지는 이유'),
+    ('활용', 'use', '이메일·메시지 톤 바꾸기: 정중하게, 짧게, 단호하게'),
+    ('입문', 'concept', '할루시네이션: AI가 그럴듯하게 틀리는 이유와 확인하는 습관'),
+    ('활용', 'prompt', '예시를 보여주면 원하는 스타일이 나온다 (퓨샷 프롬프트)'),
+    ('활용', 'use', '사진으로 물어보기: 영수증 정리, 설명서 해석, 식물·음식 이름 찾기'),
+    ('심화', 'prompt', '단계별로 생각하게 하기와 추론 모델: 언제 효과가 있을까'),
+    ('활용', 'work', '회의 내용 정리와 할 일 뽑기를 AI에게 맡기는 법'),
+    ('입문', 'prompt', '한 번에 끝내지 말고 대화로 다듬기 (반복 개선)'),
+    ('활용', 'use', 'AI와 영어 회화 연습하기: 롤플레이와 첨삭 요청법'),
+    ('심화', 'concept', '토큰과 컨텍스트 윈도우: AI가 기억하는 양에 한계가 있는 이유'),
+    ('활용', 'work', '엑셀·구글 시트 수식을 AI로 만들고 검증하는 법'),
+    ('활용', 'prompt', '출력 형식 지정하기: 표·목록·글자 수·말투'),
+    ('입문', 'safety', '딥페이크·AI 보이스피싱 구별하고 대비하기'),
+    ('활용', 'use', '여행 계획 짜기: 조건(예산·동선·아이 동반)을 주는 법'),
+    ('심화', 'concept', 'RAG: AI가 문서를 찾아보고 답하는 방식'),
+    ('활용', 'use', '아이 숙제를 도울 때: 정답 대신 힌트를 주게 하는 법'),
+    ('활용', 'prompt', '제약 조건 거는 법: 하지 말아야 할 것까지 알려주기'),
+    ('심화', 'tool', 'AI 에이전트란? 스스로 검색하고 도구를 쓰는 AI'),
+    ('활용', 'work', '보고서·기획서 초안을 AI와 함께 쓰는 순서'),
+    ('입문', 'tool', '검색형 AI와 대화형 AI의 차이: 출처 확인이 필요한 순간'),
+    ('활용', 'use', '경제 뉴스를 AI로 이해하기: 쉽게 풀어 달라고 하는 법 (투자 판단은 스스로)'),
+    ('심화', 'prompt', '프롬프트 체이닝: 큰 작업을 단계로 쪼개 시키기'),
+    ('활용', 'use', '식단·장보기 목록·냉장고 속 재료로 레시피 받기'),
+    ('입문', 'concept', '같은 질문에 답이 매번 다른 이유 (temperature와 무작위성)'),
+    ('활용', 'prompt', 'AI가 먼저 질문하게 하기: "필요한 정보를 먼저 물어봐 줘"'),
+    ('활용', 'work', '어려운 대화·협상 연습: 상대 역할을 맡겨 리허설하기'),
+    ('심화', 'tool', '나만의 맞춤 AI 만들기 (맞춤 지침·프로젝트·GPTs·Gems 개념)'),
+    ('입문', 'safety', 'AI가 만든 글·그림의 저작권과 출처 표기 기본'),
+    ('활용', 'use', '이미지 생성 프롬프트 잘 쓰는 법: 주제·스타일·구도·조명'),
+    ('활용', 'prompt', '자기 검토 시키기: "방금 답을 비판적으로 다시 검토해 줘"'),
+    ('심화', 'concept', '멀티모달 AI: 글·이미지·음성을 함께 이해하는 원리'),
+    ('활용', 'work', '데이터 분석 맡기기: 표·CSV를 올려 인사이트 뽑는 법'),
+    ('입문', 'use', '음성으로 AI와 대화하기: 운전·요리 중 활용법'),
+    ('활용', 'prompt', '반대 의견 물어보기: 확증 편향을 피하는 질문법'),
+    ('심화', 'work', '코딩 몰라도 되는 자동화: AI로 간단한 스크립트·매크로 만들기'),
+    ('활용', 'use', '공부 파트너로 쓰기: 요약·퀴즈·암기 카드 만들기'),
+    ('입문', 'safety', '건강·법률·돈 문제를 AI에 물을 때 꼭 지킬 것'),
+    ('활용', 'prompt', '프롬프트 템플릿 만들어 두고 재사용하기'),
+    ('심화', 'concept', '파인튜닝과 프롬프트의 차이: AI를 "가르치는" 두 가지 방법'),
+    ('활용', 'use', '글 첨삭 받기: 맞춤법이 아니라 구조·논리 피드백 요청법'),
+    ('활용', 'work', '번역할 때 뉘앙스 살리기: 상황·상대·목적 알려주기'),
+    ('심화', 'prompt', '시스템 프롬프트와 지침: AI의 기본 성격을 정하는 법'),
+    ('입문', 'tool', '무료로 AI를 똑똑하게 쓰는 법: 무료 한도와 기능 차이 이해하기'),
+    ('활용', 'use', '블로그·SNS 글감과 제목 아이디어 브레인스토밍'),
+    ('심화', 'safety', '프롬프트 인젝션: 웹페이지·문서 속 숨은 지시를 조심해야 하는 이유'),
+    ('활용', 'prompt', '독자를 정해 주기: "초등학생에게 설명하듯" 말하게 하는 법'),
+    ('활용', 'work', '긴 계약서·약관을 쉽게 풀어보기 (중요한 결정은 전문가와)'),
+    ('심화', 'concept', 'AI는 왜 최신 정보를 모를까? 학습 데이터와 지식 기준일'),
+    ('활용', 'use', '아이와 함께 쓰는 AI: 동화 만들기·질문 놀이와 안전 수칙'),
+    ('활용', 'prompt', '평가 기준을 주고 고르게 하기: 여러 안 중 최선 선택'),
+    ('심화', 'tool', 'AI가 브라우저·컴퓨터를 대신 조작하는 기능: 할 수 있는 일과 주의점'),
+    ('입문', 'concept', 'AI가 잘하는 일과 못하는 일 구분하기'),
+]
+TALK_ONE = ('{"q": "", "ko": "", "words": [{"w": "", "pos": "", "ko": "", "note": "", "ex": ""}], "grammar": {"point": "", "desc": ""}, '
+            '"explain": "", "how": "", "starters": ["", "", ""], "samples": [{"tag": "심플", "en": "", "ko": ""}, '
+            '{"tag": "자연스럽게", "en": "", "ko": ""}, {"tag": "한 단계 위", "en": "", "ko": ""}], "watch": [], "key": []}')
+
+
+def _s(v, n=600):
+    return re.sub(r'\s+', ' ', str(v or '')).strip()[:n]
+
+
+def _quiz(q):
+    q = q if isinstance(q, dict) else {}
+    opts = [_s(o, 120) for o in (q.get('options') or []) if _s(o)][:4]
+    try:
+        ans = int(q.get('answer', 0))
+    except Exception:
+        ans = 0
+    if not q.get('q') or len(opts) < 2:
+        return None
+    return {'q': _s(q.get('q'), 200), 'options': opts, 'answer': ans if 0 <= ans < len(opts) else 0, 'explain': _s(q.get('explain'), 300)}
+
+
+def _talk_level(r, lv):
+    r = r if isinstance(r, dict) else {}
+    q = _s(r.get('q'), 320)
+    if len(q) < 30 or '?' not in q:
+        return None
+    words = [{'w': _s(w.get('w'), 40), 'pos': _s(w.get('pos'), 12), 'ko': _s(w.get('ko'), 80), 'note': _s(w.get('note'), 200), 'ex': _s(w.get('ex'), 160)}
+             for w in (r.get('words') or []) if isinstance(w, dict) and w.get('w') and w.get('ko')][:6]
+    samples = [{'tag': _s(x.get('tag'), 10), 'en': _s(x.get('en'), 420), 'ko': _s(x.get('ko'), 420)}
+               for x in (r.get('samples') or []) if isinstance(x, dict) and x.get('en')][:3]
+    if len(words) < 2 or len(samples) < 2:
+        return None
+    g = r.get('grammar') if isinstance(r.get('grammar'), dict) else {}
+    return {'lv': lv, 'q': q, 'ko': _s(r.get('ko'), 300), 'words': words,
+            'grammar': {'point': _s(g.get('point'), 80), 'desc': _s(g.get('desc'), 300)} if g.get('point') else None,
+            'explain': _s(r.get('explain'), 500), 'how': _s(r.get('how'), 300),
+            'starters': [_s(x, 90) for x in (r.get('starters') or []) if _s(x)][:3], 'samples': samples,
+            'watch': [_s(x, 140) for x in (r.get('watch') or []) if _s(x)][:4], 'key': [_s(x, 100) for x in (r.get('key') or []) if _s(x)][:4]}
+
+
+def build_talk(news):
+    talks = CACHE.setdefault('talks', [])     # 최근 Talk Pick (최신 먼저)
+    hist = CACHE.setdefault('talkHist', [])   # 지금까지 낸 질문 (반복 방지)
+    ed = edition_date()
+    if talks and talks[0].get('date') == ed:
+        return talks
+    if not os.environ.get('GEMINI_API_KEY', '').strip():
+        return talks
+    di = datetime.fromisoformat(ed).toordinal()
+    th, th_ko = TALK_THEMES[di % len(TALK_THEMES)]
+    t1, t2 = TALK_TYPES[di % len(TALK_TYPES)], TALK_TYPES[(di + 3) % len(TALK_TYPES)]
+    ctx = ''
+    if th in ('money', 'tech', 'society') and news:
+        heads = [x.get('tk') or x.get('t') for x in (news.get('top') or [])[:6]]
+        ctx = '\n[오늘 뉴스 — 참고만. 억지로 맞추지 말고, 자연스러우면 시사적인 질문으로]\n' + '\n'.join(f'- {h}' for h in heads if h) + '\n'
+    recent = '\n'.join(f"- {h['q']}" for h in hist[-60:]) or '- (아직 없음)'
+    prompt = f"""오늘({ed})의 'Talk Pick' 영어 질문 2개(중급·중상급)를 만들어줘.
+오늘 주제: {th_ko}
+질문 유형: 중급 → {t1} / 중상급 → {t2}
+{ctx}
+[최근에 낸 질문 — 비슷한 내용·표현 금지]
+{recent}
+
+질문 규칙
+- 영어 한 문장. 원어민이 실제 대화에서 쓰는 자연스러운 질문으로, 잠깐 생각해 보고 2~4문장으로 답하게 되는 질문 (yes/no로 끝나는 질문 금지)
+- 중급(B1+): 16~28단어. 쉬운 단어 위주지만 꼭 배워 둘 구동사·콜로케이션 1~2개 포함 (예: eat up, end up, get used to, make the most of)
+- 중상급(B2): 20~35단어. 조금 추상적이거나 판단·비교가 필요한 질문. 관용 표현이나 고급 콜로케이션 2개 이상 (예: be torn between, in hindsight, cut corners, worth the trade-off)
+- 너무 단순하지 않게, 한국 학습자가 배워 두면 좋은 표현을 자연스럽게 녹이기
+- 정치 성향·종교·개인 신상 같은 민감한 주제는 피하기
+
+각 질문마다
+- ko: 자연스러운 한국어 해석
+- words: 질문 속 핵심 단어·표현 4~6개. w(질문에 나온 형태 그대로), pos(동사·명사·형용사·부사·구동사·관용구 등), ko(뜻), note(뉘앙스·쓰임 1문장: 비슷한 말과 차이, 자주 쓰는 상황), ex(짧은 영어 예문)
+- grammar: 질문에 쓰인 문법 포인트 1개 (point: 형태, desc: 쉬운 설명과 답할 때 쓰는 법 1~2문장)
+- explain: 질문 전체 해설 2~3문장 (무엇을 묻는지, 숨은 뉘앙스, 원어민이 언제 이런 질문을 하는지)
+- how: 답변 요령 1~2문장 (어떤 구조로 답하면 좋은지)
+- starters: 답변을 시작하는 영어 문장 3개 (각각 '...'으로 끝나서 이어 쓸 수 있게)
+- samples: 모범 답안 3개 — "심플"(쉬운 단어로 2문장), "자연스럽게"(원어민 일상 말투 2~3문장), "한 단계 위"(고급 표현 2~3문장). 각 en, ko
+- watch: 이 질문에 답할 때 한국 학습자가 자주 틀리는 점 3~4개 (한국어로 짧게, 예: "가정법 질문이니 I want 대신 I'd ~로 답해요")
+- key: 답변에 써먹기 좋은 표현 3~4개 ("표현 — 뜻" 형식)
+
+JSON으로만 답해:
+{{"mid": {TALK_ONE},
+ "high": {TALK_ONE}}}"""
+    res = ai_chat(prompt, max_tokens=8000, sysmsg=TALK_SYS, temp=0.9)
+    mid = _talk_level(res.get('mid'), '중급') if isinstance(res, dict) else None
+    high = _talk_level(res.get('high'), '중상급') if isinstance(res, dict) else None
+    if not mid or not high or mid['q'] == high['q']:
+        log('!! talk failed')
+        return talks
+    talks.insert(0, {'date': ed, 'theme': th, 'themeKo': th_ko, 'mid': mid, 'high': high})
+    del talks[14:]
+    hist.extend([{'date': ed, 'q': mid['q']}, {'date': ed, 'q': high['q']}])
+    del hist[:-200]
+    log('talk ok:', mid['q'][:60], '|', high['q'][:60])
+    return talks
+
+
+def build_tip(news):
+    tips = CACHE.setdefault('tips', [])       # 최근 AI 한 스푼 (최신 먼저)
+    hist = CACHE.setdefault('tipHist', [])    # 지금까지 다룬 주제
+    ed = edition_date()
+    if tips and tips[0].get('date') == ed:
+        return tips
+    if not os.environ.get('GEMINI_API_KEY', '').strip():
+        return tips
+    level, cat, seed = TIP_SEEDS[len(hist) % len(TIP_SEEDS)]
+    heads = [x.get('tk') or x.get('t') for x in ((news or {}).get('cats') or {}).get('tech', [])[:6]]
+    ctx = '\n'.join(f'- {h}' for h in heads if h) or '- (없음)'
+    recent = '\n'.join(f"- {h['title']} ({TIP_CATS.get(h.get('cat'), '')})" for h in hist[-60:]) or '- (아직 없음)'
+    prompt = f"""오늘({ed})의 'AI 한 스푼'을 만들어줘. 독자는 AI를 막 쓰기 시작했거나 더 잘 쓰고 싶은 일반인(직장인·부모 포함)이야.
+
+오늘 주제(출발점): {seed}
+분류: {TIP_CATS[cat]} · 난이도: {level} (입문: 처음 쓰는 사람도 이해 / 활용: 바로 써먹는 요령 / 심화: 원리와 고급 기법)
+이미 다룬 주제와 겹치면 같은 분류 안에서 새로운 각도로 바꿔도 돼.
+
+[오늘의 AI·기술 뉴스 — 참고만. 주제와 이어지면 intro에서 한 줄로 연결]
+{ctx}
+
+[최근 다룬 주제 — 반복 금지]
+{recent}
+
+작성 규칙
+- title: 호기심을 끄는 제목, 35자 이내
+- intro: 왜 알아두면 좋은지 1~2문장
+- body: 3~5개 단락, 각 2~3문장. 쉬운 말, 비유, 구체적인 상황 예시
+- compare: 프롬프트 비교가 어울리면 bad(아쉬운 프롬프트)·good(좋은 프롬프트)·why(차이 1~2문장), 어울리지 않으면 null
+- try: 오늘 바로 해보기. desc(무엇을 해보는지 1문장), prompt(복사해서 바로 쓰는 한국어 프롬프트, 바꿔 쓸 부분은 [대괄호])
+- steps: 따라 하는 단계가 있으면 3~5개, 없으면 []
+- keywords: 관련 용어 2~4개 (term, desc: 쉬운 설명 1~2문장)
+- caution: 주의할 점 1~2문장 (없으면 "")
+- takeaway: 한 줄 정리
+- quiz: 이해 확인 문제 1개 (options 3개, answer는 정답 번호 0부터, explain 1~2문장)
+- 특정 서비스의 요금·버전·기능은 자주 바뀌니 단정하지 말고 "대부분의 AI 챗봇(ChatGPT·Gemini·Claude 등)"처럼 일반적으로 설명
+
+JSON으로만 답해:
+{{"title": "", "intro": "", "body": [], "compare": {{"bad": "", "good": "", "why": ""}}, "try": {{"desc": "", "prompt": ""}}, "steps": [],
+ "keywords": [{{"term": "", "desc": ""}}], "caution": "", "takeaway": "", "quiz": {{"q": "", "options": ["", "", ""], "answer": 0, "explain": ""}}}}"""
+    res = ai_chat(prompt, max_tokens=6000, sysmsg=TIP_SYS, temp=0.7)
+    if not isinstance(res, dict) or not res.get('title') or not isinstance(res.get('body'), list) or len(res['body']) < 2:
+        log('!! tip failed')
+        return tips
+    cp = res.get('compare') if isinstance(res.get('compare'), dict) else {}
+    tr = res.get('try') if isinstance(res.get('try'), dict) else {}
+    tip = {'date': ed, 'level': level, 'cat': cat, 'catKo': TIP_CATS[cat], 'title': _s(res['title'], 80), 'intro': _s(res.get('intro'), 300),
+           'body': [_s(b, 500) for b in res['body'] if _s(b)][:5],
+           'compare': {'bad': _s(cp.get('bad'), 400), 'good': _s(cp.get('good'), 700), 'why': _s(cp.get('why'), 300)} if cp.get('bad') and cp.get('good') else None,
+           'try': {'desc': _s(tr.get('desc'), 200), 'prompt': _s(tr.get('prompt'), 900)} if tr.get('prompt') else None,
+           'steps': [_s(x, 200) for x in (res.get('steps') or []) if _s(x)][:5],
+           'keywords': [{'term': _s(k.get('term'), 40), 'desc': _s(k.get('desc'), 300)} for k in (res.get('keywords') or [])
+                        if isinstance(k, dict) and k.get('term') and k.get('desc')][:4],
+           'caution': _s(res.get('caution'), 300), 'takeaway': _s(res.get('takeaway'), 200), 'quiz': _quiz(res.get('quiz'))}
+    tips.insert(0, tip)
+    del tips[14:]
+    hist.append({'date': ed, 'title': tip['title'], 'cat': cat})
+    del hist[:-200]
+    log('tip ok:', tip['title'])
+    return tips
+
+
+def build_daily(news):
+    talks = safe(lambda: build_talk(news), CACHE.get('talks', []), 'talk')
+    tips = safe(lambda: build_tip(news), CACHE.get('tips', []), 'tip')
+    return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'talks': talks or [], 'tips': tips or []}
+
+
 def finish_news(clusters, market):
     # 화면용 기사 정리
     def item_out(x, n=1):
@@ -1035,6 +1274,12 @@ def main():
                     json.dump(market, f, ensure_ascii=False, separators=(',', ':'))
             with open(os.path.join(OUT, 'news.json'), 'w', encoding='utf-8') as f:
                 json.dump(news, f, ensure_ascii=False, separators=(',', ':'))
+    else:
+        news = None
+    daily = safe(lambda: build_daily(news), None, 'daily') or {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'),
+                                                                 'talks': CACHE.get('talks', []), 'tips': CACHE.get('tips', [])}
+    with open(os.path.join(OUT, 'daily.json'), 'w', encoding='utf-8') as f:
+        json.dump(daily, f, ensure_ascii=False, separators=(',', ':'))
     with open(os.path.join(OUT, 'cache.json'), 'w', encoding='utf-8') as f:
         json.dump(CACHE, f, ensure_ascii=False, separators=(',', ':'))
     with open(os.path.join(OUT, 'log.txt'), 'w', encoding='utf-8') as f:
