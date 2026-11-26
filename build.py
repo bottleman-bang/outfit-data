@@ -556,9 +556,50 @@ def build_news():
 
 
 # ---------------- 번역 (무료) ----------------
+EN_FIX = [(r'\bedges? (lower|down)\b', 'slips slightly'), (r'\bedges? (higher|up)\b', 'rises slightly'), (r'\bticks? (up|higher)\b', 'rises slightly'),
+          (r'\bticks? (down|lower)\b', 'dips slightly'), (r'\bWall St\b', 'Wall Street'), (r'\bFed\b', 'Federal Reserve')]
+KO_FIX = [('했습니다', '했다'), ('됐습니다', '됐다'), ('되었습니다', '됐다'), ('졌습니다', '졌다'), ('합니다', '한다'), ('됩니다', '된다'),
+          ('입니다', '이다'), ('있습니다', '있다'), ('없습니다', '없다'), ('습니다', '다'), ('연방준비제도', '연준'), ('연방 준비 은행', '연준')]
+
+
+def tidy_ko(t):
+    t = t.strip().rstrip('.')
+    for a, b in KO_FIX:
+        t = t.replace(a, b)
+    return t
+
+
 def gtx(texts):
-    """무료 번역 (Google 번역 공개 엔드포인트). 실패하면 빈 결과."""
+    """무료 번역 (Google 번역 공개 엔드포인트 2가지). 실패하면 빈 결과."""
+    fixed = []
+    for k, t in texts:
+        for pat, rep in EN_FIX:
+            t = re.sub(pat, rep, t, flags=re.I)
+        fixed.append((k, t))
+    res = _gtx(fixed)
+    return {k: tidy_ko(v) for k, v in res.items()}
+
+
+def _gtx(texts):
     out = {}
+    # 1) 여러 제목을 한 번에 (clients5)
+    todo = list(texts)
+    for i in range(0, len(todo), 16):
+        chunk = todo[i:i + 16]
+        try:
+            qs = '&'.join('q=' + urllib.parse.quote(t.replace('\n', ' ')) for _, t in chunk)
+            d = json.loads(get('https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ko&' + qs, timeout=20))
+            if isinstance(d, list) and len(d) == len(chunk):
+                for (k, _), v in zip(chunk, d):
+                    tv = v[0] if isinstance(v, list) else v
+                    if isinstance(tv, str) and tv.strip():
+                        out[k] = tv.strip()
+        except Exception as e:  # noqa
+            log('!! clients5', type(e).__name__, str(e)[:100])
+        time.sleep(0.4)
+    texts = [(k, t) for k, t in texts if k not in out]
+    if not texts:
+        return out
     batch, size = [], 0
     def flush(b):
         if not b:
