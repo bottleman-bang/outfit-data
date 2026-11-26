@@ -633,8 +633,8 @@ def _gtx(texts):
 
 
 # ---------------- AI 요약 (GitHub Models, 무료) ----------------
-GEM_MODELS = [m for m in [os.environ.get('AI_MODEL'), 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest',
-                             'gemini-2.5-flash-lite', 'gemini-2.0-flash'] if m]
+GEM_MODELS = [m for m in [os.environ.get('AI_MODEL'), 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash-lite',
+                             'gemini-flash-lite-latest'] if m]
 GEM_OK = []   # 이번 실행에서 성공한 모델 (다음 호출에 먼저 사용)
 
 
@@ -654,27 +654,35 @@ def ai_chat(prompt, max_tokens=4000):
         if '2.5' in model:
             gc['thinkingConfig'] = {'thinkingBudget': 0}   # 빠르게 (생각 단계 끄기)
         body = {'systemInstruction': {'parts': [{'text': sysmsg}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}], 'generationConfig': gc}
-        try:
-            req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
-                                         data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                d = json.loads(r.read().decode('utf-8'))
-            parts = ((d.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
-            content = ''.join(p.get('text', '') for p in parts)
-            m = re.search(r'\{.*\}', content, re.S)
-            if not m:
-                log('!! gemini empty', model, str(d)[:200])
-                continue
-            res = json.loads(m.group(0))
-            if model not in GEM_OK:
-                GEM_OK.insert(0, model)
-            log('gemini ok', model)
-            return res
-        except urllib.error.HTTPError as e:
-            msg = e.read().decode('utf-8', 'replace')[:200]
-            log('!! gemini', model, e.code, msg)
-        except Exception as e:  # noqa
-            log('!! gemini', model, type(e).__name__, str(e)[:160])
+        for attempt in range(2):
+          try:
+              req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+                                           data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  d = json.loads(r.read().decode('utf-8'))
+              parts = ((d.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+              content = ''.join(p.get('text', '') for p in parts)
+              m = re.search(r'\{.*\}', content, re.S)
+              if not m:
+                  log('!! gemini empty', model, str(d)[:200])
+                  continue
+              res = json.loads(m.group(0))
+              if model not in GEM_OK:
+                  GEM_OK.insert(0, model)
+              log('gemini ok', model)
+              return res
+          except urllib.error.HTTPError as e:
+              msg = e.read().decode('utf-8', 'replace')[:200]
+              log('!! gemini', model, e.code, msg)
+              if e.code == 503 and attempt == 0:
+                  time.sleep(8)
+                  continue
+              break
+          except Exception as e:  # noqa
+              log('!! gemini', model, type(e).__name__, str(e)[:160])
+              if attempt == 0 and 'Timeout' in type(e).__name__:
+                  continue
+              break
     return None
 
 
