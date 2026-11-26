@@ -739,9 +739,10 @@ def ai_summarize(cls):
 
 규칙
 - title: 자연스러운 한국어 뉴스 제목 (35자 이내, 고유명사는 한국에서 쓰는 표기)
-- lines: 3~5개. 각 1문장(70자 이내). 순서: 무슨 일인지 → 핵심 숫자·주체 → 배경·이유 → 시장·투자자에게 의미
+- lines: 문장 목록. 제목만 보고는 모를 맥락(누가·왜·이전 상황·배경)을 이해할 수 있을 만큼 쓰되 너무 길지 않게 (보통 3~6문장, 전체 400자 이내).
+  흐름: 무슨 일인지 → 핵심 숫자·주체 → 배경·이유(왜 나왔는지, 이전 흐름) → 시장·투자자에게 의미. 각 문장은 80자 이내
 - why: 투자자에게 왜 중요한지 1문장 (40자 이내)
-- 자료에 없는 숫자·사실은 절대 지어내지 마. 자료가 제목뿐이면 확실한 내용만 3줄로.
+- 자료에 없는 숫자·사실은 절대 지어내지 마. 자료가 제목뿐이면 널리 알려진 배경 정도만 덧붙여 짧게.
 - 문체는 '~했다', '~이다' 같은 뉴스체
 
 JSON 형식: {{"items": [{{"id": "id 그대로", "title": "...", "lines": ["...", "..."], "why": "..."}}]}}
@@ -753,7 +754,7 @@ JSON 형식: {{"items": [{{"id": "id 그대로", "title": "...", "lines": ["..."
     for it in (res or {}).get('items', []):
         if not isinstance(it, dict) or not it.get('id'):
             continue
-        lines = [str(l).strip() for l in (it.get('lines') or []) if str(l).strip()][:5]
+        lines = [str(l).strip() for l in (it.get('lines') or []) if str(l).strip()][:7]
         if len(lines) >= 2:
             out[str(it['id']).strip()] = {'title': str(it.get('title') or '').strip(), 'lines': lines, 'why': str(it.get('why') or '').strip()}
     return out
@@ -835,6 +836,8 @@ def finish_news(clusters, market):
     all_items = top + [x for L in per_cat.values() for x in L]
     need = {x['id']: x['t'] for x in all_items if x['lang'] == 'en'}
     tr = CACHE['tr']
+    if CACHE.get('sumv') != 2:   # 요약 방식이 바뀌면 다시 만들기
+        CACHE['sum'], CACHE['sumv'] = {}, 2
     sums = CACHE.setdefault('sum', {})     # AI 기사 요약 {id: {title, lines, why, at}}
     autos = CACHE.setdefault('auto', {})   # 자동 요약 (AI 없을 때) {id: [lines]}
     have_ai = bool(os.environ.get('GEMINI_API_KEY', '').strip())
