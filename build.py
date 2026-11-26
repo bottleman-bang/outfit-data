@@ -957,7 +957,7 @@ def finish_news(clusters, market):
 
     # (4) 핵심 요약 + 제목 번역 (1시간에 한 번, 주요 뉴스가 바뀌면)
     sig = hashlib.sha1(('|'.join(c['items'][0]['id'] for c in top_cl[:6]) + '|' + NOW.strftime('%Y%m%d%H')).encode()).hexdigest()[:12]
-    ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig else None
+    ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig and 'market_commentary' in CACHE['ai'] else None
     if not ai and have_ai:
         lines = []
         for c in clusters[:22]:
@@ -981,6 +981,7 @@ JSON으로만 답해:
 {{
  "news_brief": ["오늘 꼭 알아야 할 글로벌 경제·증시 핵심 3~5개. 각 1문장, 숫자·주체를 구체적으로"],
  "market_brief": ["시장 데이터를 해석한 요약 3~4개. 각 1문장. 원인과 의미를 짧게"],
+ "market_commentary": {{"headline": "오늘 시장을 한마디로 (30자 이내)", "paragraphs": ["왜 이렇게 움직였는지 뉴스와 데이터를 엮어 설명하는 단락 2~4개 (각 2~3문장, 미국→한국→환율·금리·원자재·코인 흐름)"], "watch": ["앞으로 주목할 일정·변수 2~3개 (각 1문장)"]}},
  "titles": {{"id": "한국어 제목"}}
 }}"""
         ai = ai_chat(prompt)
@@ -1011,6 +1012,7 @@ JSON으로만 답해:
     notes = safe(lambda: build_note(top, digest), CACHE.get('notes', []), 'note')
     return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai) or any(x.get('sumType') == 'ai' for x in top), 'notes': notes,
             'brief': (ai or {}).get('news_brief') or [], 'marketBrief': (ai or {}).get('market_brief') or [], 'digest': digest,
+            'commentary': (ai or {}).get('market_commentary') if isinstance((ai or {}).get('market_commentary'), dict) else None,
             'top': top, 'cats': per_cat, 'catNames': CAT_KO}
 
 
@@ -1026,6 +1028,7 @@ def main():
         if news:
             if market:  # 시장 요약은 증시 화면에서도 쓰도록
                 market['brief'] = news['marketBrief']
+                market['commentary'] = news.get('commentary')
                 market['digest'] = news['digest']
                 market['ai'] = news['ai']
                 with open(os.path.join(OUT, 'market.json'), 'w', encoding='utf-8') as f:
