@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -632,37 +633,122 @@ def _gtx(texts):
 
 
 # ---------------- AI 요약 (GitHub Models, 무료) ----------------
-def ai_chat(prompt, max_tokens=3500):
-    """AI 요약 (선택). 무료 Gemini API 키(GEMINI_API_KEY)가 있으면 사용, 없으면 건너뛰고 규칙 기반 요약을 써요."""
-    sysmsg = '너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 사실만 쓰고, 과장하지 말고, 투자 권유는 하지 마. 반드시 JSON만 출력해.'
+GEM_MODELS = [m for m in [os.environ.get('AI_MODEL'), 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest',
+                             'gemini-2.5-flash-lite', 'gemini-2.0-flash'] if m]
+GEM_OK = []   # 이번 실행에서 성공한 모델 (다음 호출에 먼저 사용)
+
+
+def ai_chat(prompt, max_tokens=4000):
+    """AI 요약 (선택). 무료 Gemini API 키(GEMINI_API_KEY)가 있으면 사용, 없으면 None."""
     key = os.environ.get('GEMINI_API_KEY', '').strip()
-    if key:
-        for model in [os.environ.get('AI_MODEL') or 'gemini-2.5-flash', 'gemini-2.0-flash']:
-            try:
-                body = {'systemInstruction': {'parts': [{'text': sysmsg}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
-                        'generationConfig': {'temperature': 0.4, 'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}}
-                txt = get(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}',
-                          data=json.dumps(body).encode(), timeout=60, tries=1, headers={'Content-Type': 'application/json'})
-                content = json.loads(txt)['candidates'][0]['content']['parts'][0]['text']
-                m = re.search(r'\{.*\}', content, re.S)
-                if m:
-                    return json.loads(m.group(0))
-            except Exception as e:  # noqa
-                log('!! gemini', model, type(e).__name__, str(e)[:160])
-    # (예전) GitHub Models — 지금은 기본으로 쓰지 않아요. USE_GH_MODELS=1 일 때만 시도
-    tok = os.environ.get('GITHUB_TOKEN') if os.environ.get('USE_GH_MODELS') == '1' else None
-    if tok:
+    if not key:
+        return None
+    sysmsg = ('너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 주어진 자료에 있는 사실만 쓰고, 숫자나 사실을 지어내지 마. '
+              '과장하지 말고 투자 권유는 하지 마. 자연스러운 한국어 뉴스 문체로 쓰고, 반드시 JSON만 출력해.')
+    tried = set()
+    for model in GEM_OK + GEM_MODELS:
+        if model in tried:
+            continue
+        tried.add(model)
+        gc = {'temperature': 0.3, 'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}
+        if '2.5' in model:
+            gc['thinkingConfig'] = {'thinkingBudget': 0}   # 빠르게 (생각 단계 끄기)
+        body = {'systemInstruction': {'parts': [{'text': sysmsg}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}], 'generationConfig': gc}
         try:
-            b = {'model': 'openai/gpt-4.1-mini', 'temperature': 0.4, 'max_tokens': max_tokens,
-                 'messages': [{'role': 'system', 'content': sysmsg}, {'role': 'user', 'content': prompt}]}
-            txt = get('https://models.github.ai/inference/chat/completions', data=json.dumps(b).encode(), timeout=60, tries=1,
-                      headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Accept': 'application/json'})
-            content = json.loads(txt)['choices'][0]['message']['content']
+            req = urllib.request.Request(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+                                         data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'x-goog-api-key': key})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                d = json.loads(r.read().decode('utf-8'))
+            parts = ((d.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+            content = ''.join(p.get('text', '') for p in parts)
             m = re.search(r'\{.*\}', content, re.S)
-            return json.loads(m.group(0)) if m else None
+            if not m:
+                log('!! gemini empty', model, str(d)[:200])
+                continue
+            res = json.loads(m.group(0))
+            if model not in GEM_OK:
+                GEM_OK.insert(0, model)
+            log('gemini ok', model)
+            return res
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode('utf-8', 'replace')[:200]
+            log('!! gemini', model, e.code, msg)
         except Exception as e:  # noqa
-            log('!! gh models', type(e).__name__, str(e)[:160])
+            log('!! gemini', model, type(e).__name__, str(e)[:160])
     return None
+
+
+# ---------- 기사 본문 (공개된 매체만) ----------
+NO_FETCH = ('bloomberg.com', 'wsj.com', 'ft.com', 'economist.com', 'barrons.com', 'nytimes.com', 'reuters.com', 'news.google.com',
+            'washingtonpost.com', 'businessinsider.com', 'marketwatch.com', 'theinformation.com')
+BOILER = re.compile(r'(?i)copyright|all rights reserved|무단\s?전재|재배포\s?금지|구독|subscribe|newsletter|cookie|sign up|광고|제보|기자\s?=|@yna|ⓒ|©')
+
+
+def article_text(url, limit=2200):
+    host = urllib.parse.urlparse(url).netloc.lower()
+    if not host or any(h in host for h in NO_FETCH):
+        return ''
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': UA, 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8'})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            raw = r.read(800_000)
+            cs = r.headers.get_content_charset() or ''
+        if not cs:
+            m = re.search(rb'charset=["\']?([\w-]+)', raw[:4000])
+            cs = m.group(1).decode() if m else 'utf-8'
+        h = raw.decode(cs, errors='replace')
+    except Exception:
+        return ''
+    h = re.sub(r'(?is)<(script|style|noscript|figure|figcaption|aside|nav|footer|header|form)[^>]*>.*?</\1>', ' ', h)
+    paras = [strip_html(p) for p in re.findall(r'(?is)<p[^>]*>(.*?)</p>', h)]
+    paras = [p for p in paras if len(p) >= 40 and not BOILER.search(p)]
+    return ' '.join(paras)[:limit]
+
+
+def sentences(text, lang):
+    text = re.sub(r'\s+', ' ', text or '').strip()
+    if not text:
+        return []
+    parts = re.split(r'(?<=다\.)\s+|(?<=[.!?])\s+(?=[A-Z가-힣"“‘\(])', text) if lang == 'ko' else re.split(r'(?<=[.!?])\s+(?=[A-Z"“‘\(])', text)
+    bad = re.compile(r'(?i)day[- ]ahead|newsletter|sign up|click here|read more|이 기사|관련 기사|사진=|영상=|▶')
+    return [p.strip() for p in parts if (30 if lang == 'ko' else 50) <= len(p.strip()) <= 260 and not bad.search(p)]
+
+
+def ai_summarize(cls):
+    """주요 뉴스 기사별 3~5줄 요약 (Gemini)"""
+    blocks = []
+    for c in cls:
+        h = c['items'][0]
+        ev = [f"제목: {h['t']} ({h['s']})"]
+        if h['d']:
+            ev.append(f"설명: {h['d'][:300]}")
+        if c.get('text'):
+            ev.append(f"본문 일부: {c['text'][:1800]}")
+        for o in c['items'][1:4]:
+            ev.append(f"같은 사건 다른 매체: {o['s']} — {o['t']}" + (f" / {o['d'][:160]}" if o['d'] else ''))
+        blocks.append(f"[id={h['id']}]\n" + '\n'.join(ev))
+    prompt = f"""다음은 지금({NOW.astimezone(KST):%m월 %d일 %H:%M} KST) 주요 경제·증시 뉴스야. 각 뉴스를 한국어로 정리해줘.
+
+규칙
+- title: 자연스러운 한국어 뉴스 제목 (35자 이내, 고유명사는 한국에서 쓰는 표기)
+- lines: 3~5개. 각 1문장(70자 이내). 순서: 무슨 일인지 → 핵심 숫자·주체 → 배경·이유 → 시장·투자자에게 의미
+- why: 투자자에게 왜 중요한지 1문장 (40자 이내)
+- 자료에 없는 숫자·사실은 절대 지어내지 마. 자료가 제목뿐이면 확실한 내용만 3줄로.
+- 문체는 '~했다', '~이다' 같은 뉴스체
+
+JSON 형식: {{"items": [{{"id": "id 그대로", "title": "...", "lines": ["...", "..."], "why": "..."}}]}}
+
+뉴스
+{chr(10).join(blocks)}"""
+    res = ai_chat(prompt, max_tokens=6000)
+    out = {}
+    for it in (res or {}).get('items', []):
+        if not isinstance(it, dict) or not it.get('id'):
+            continue
+        lines = [str(l).strip() for l in (it.get('lines') or []) if str(l).strip()][:5]
+        if len(lines) >= 2:
+            out[str(it['id']).strip()] = {'title': str(it.get('title') or '').strip(), 'lines': lines, 'why': str(it.get('why') or '').strip()}
+    return out
 
 
 def fmt_pct(v):
@@ -741,64 +827,98 @@ def finish_news(clusters, market):
     all_items = top + [x for L in per_cat.values() for x in L]
     need = {x['id']: x['t'] for x in all_items if x['lang'] == 'en'}
     tr = CACHE['tr']
-
-    # AI 요약 (30분에 한 번, 내용이 바뀌었을 때)
+    sums = CACHE.setdefault('sum', {})     # AI 기사 요약 {id: {title, lines, why, at}}
+    autos = CACHE.setdefault('auto', {})   # 자동 요약 (AI 없을 때) {id: [lines]}
+    have_ai = bool(os.environ.get('GEMINI_API_KEY', '').strip())
     digest = market_digest(market) if market else []
-    sig = hashlib.sha1(('|'.join(c['items'][0]['id'] for c in top_cl[:6]) + '|' + NOW.strftime('%Y%m%d%H') + str(NOW.minute // 30)).encode()).hexdigest()[:12]
+
+    # (1) 주요 뉴스 본문 모으기 (공개된 매체만)
+    def grab(c):
+        for i in c['items'][:4]:
+            t = article_text(i['u'])
+            if len(t) >= 200:
+                return t
+        return ''
+    need_text = [c for c in top_cl if c['items'][0]['id'] not in sums or (not have_ai and c['items'][0]['id'] not in autos)]
+    for c, t in zip(need_text, pmap(grab, need_text, 6)):
+        c['text'] = t
+
+    # (2) 기사별 3~5줄 AI 요약 (새 기사만 → 무료 한도 아끼기)
+    new = [c for c in top_cl if c['items'][0]['id'] not in sums]
+    if have_ai and new:
+        res = ai_summarize(new)
+        for k, v in res.items():
+            sums[k] = {**v, 'at': NOW.isoformat(timespec='minutes')}
+        log(f'ai article summaries: {len(res)}/{len(new)}')
+
+    # (3) AI가 없거나 실패한 기사는 본문 앞부분으로 자동 요약 (번역)
+    todo = []
+    for c in top_cl:
+        h = c['items'][0]
+        if h['id'] in sums or h['id'] in autos:
+            continue
+        sl = sentences(c.get('text') or '', h['lang'])[:3] or sentences(h['d'], h['lang'])[:3]
+        if sl:
+            todo.append((h, sl))
+    tr_in = [(f"{h['id']}#{j}", line) for h, sl in todo if h['lang'] == 'en' for j, line in enumerate(sl)]
+    tr_out = gtx(tr_in) if tr_in else {}
+    for h, sl in todo:
+        autos[h['id']] = [tr_out.get(f"{h['id']}#{j}", line) if h['lang'] == 'en' else line for j, line in enumerate(sl)]
+
+    # (4) 핵심 요약 + 제목 번역 (1시간에 한 번, 주요 뉴스가 바뀌면)
+    sig = hashlib.sha1(('|'.join(c['items'][0]['id'] for c in top_cl[:6]) + '|' + NOW.strftime('%Y%m%d%H')).encode()).hexdigest()[:12]
     ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig else None
-    if not ai and (os.environ.get('GEMINI_API_KEY') or os.environ.get('USE_GH_MODELS') == '1'):
+    if not ai and have_ai:
         lines = []
-        for i, c in enumerate(clusters[:22]):
+        for c in clusters[:22]:
             h = c['items'][0]
-            lines.append(f"[{h['id']}] ({CAT_KO.get(h['c'], h['c'])}, {h['s']}, {c['n']}개 매체) {h['t']}" + (f" — {h['d'][:160]}" if h['d'] else ''))
+            s_ = sums.get(h['id'])
+            lines.append(f"[{h['id']}] ({CAT_KO.get(h['c'], h['c'])}, {h['s']}, {c['n']}개 매체) {h['t']}" +
+                         (f" — {' '.join(s_['lines'][:2])}" if s_ else (f" — {h['d'][:160]}" if h['d'] else '')))
         untranslated = [f"{k}: {v}" for k, v in need.items() if k not in tr][:70]
-        prompt = f"""아래는 지금 시각({NOW.astimezone(KST):%m월 %d일 %H:%M} KST) 시장 데이터와 주요 뉴스야.
+        prompt = f"""지금({NOW.astimezone(KST):%m월 %d일 %H:%M} KST) 시장 데이터와 주요 뉴스야.
 
 [시장 데이터]
 {chr(10).join(digest) or '없음'}
 
-[뉴스 (id, 분류, 매체, 보도 매체 수, 제목 — 설명)]
+[뉴스 (id, 분류, 매체, 보도 매체 수, 제목 — 요약)]
 {chr(10).join(lines)}
 
 [번역할 영어 제목 (id: 제목)]
 {chr(10).join(untranslated) or '없음'}
 
-다음 JSON 형식으로만 답해:
+JSON으로만 답해:
 {{
- "news_brief": ["오늘 꼭 알아야 할 글로벌 경제·증시 핵심 3~5개. 각 1문장, 숫자·주체를 구체적으로, 자연스러운 한국어"],
+ "news_brief": ["오늘 꼭 알아야 할 글로벌 경제·증시 핵심 3~5개. 각 1문장, 숫자·주체를 구체적으로"],
  "market_brief": ["시장 데이터를 해석한 요약 3~4개. 각 1문장. 원인과 의미를 짧게"],
- "top": [{{"id": "뉴스 id", "title": "자연스러운 한국어 제목", "summary": "1~2문장 요약", "why": "투자자에게 왜 중요한지 1문장"}}] (중요한 순서로 6개),
- "titles": {{"id": "한국어 제목"}} (번역할 영어 제목 전부, 고유명사는 한국에서 쓰는 표기로)
+ "titles": {{"id": "한국어 제목"}}
 }}"""
         ai = ai_chat(prompt)
         if ai:
             ai['sig'] = sig
             CACHE['ai'] = ai
-            log('ai summary ok')
+            log('ai brief ok')
     if ai and isinstance(ai.get('titles'), dict):
-        tr.update({k: v for k, v in ai['titles'].items() if isinstance(v, str)})
-    # AI가 못 한 번역은 무료 번역으로
-    rest = [(k, v) for k, v in need.items() if k not in tr]
+        tr.update({k: v for k, v in ai['titles'].items() if isinstance(v, str) and v.strip()})
+    rest = [(k, v) for k, v in need.items() if k not in tr]   # AI가 못 한 번역은 무료 번역으로
     if rest:
         tr.update(gtx(rest))
     for x in all_items:
         if x['lang'] == 'en' and tr.get(x['id']):
             x['tk'] = tr[x['id']]
-    ai_top = {t.get('id'): t for t in (ai or {}).get('top', []) if isinstance(t, dict)}
     for x in top:
-        a = ai_top.get(x['id'])
-        if a:
-            x['tk'] = a.get('title') or x.get('tk')
-            x['sum'] = a.get('summary', '')
-            x['why'] = a.get('why', '')
-    if ai_top:  # AI가 고른 순서로
-        order = [k for k in ai_top if any(t['id'] == k for t in top)]
-        top.sort(key=lambda x: order.index(x['id']) if x['id'] in order else 99)
-    # 캐시 정리
-    if len(tr) > 4000:
-        for k in list(tr)[:len(tr) - 3000]:
-            tr.pop(k, None)
-    return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai),
+        sm = sums.get(x['id'])
+        if sm:
+            x['tk'] = sm.get('title') or x.get('tk')
+            x['sum'], x['why'], x['sumType'] = sm['lines'], sm.get('why', ''), 'ai'
+        elif autos.get(x['id']):
+            x['sum'], x['sumType'] = autos[x['id']], 'auto'
+    # 캐시 정리 (오래된 것부터)
+    for store, keep in ((tr, 3000), (sums, 400), (autos, 400)):
+        if len(store) > keep + 200:
+            for k in list(store)[:len(store) - keep]:
+                store.pop(k, None)
+    return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai) or any(x.get('sumType') == 'ai' for x in top),
             'brief': (ai or {}).get('news_brief') or [], 'marketBrief': (ai or {}).get('market_brief') or [], 'digest': digest,
             'top': top, 'cats': per_cat, 'catNames': CAT_KO}
 
