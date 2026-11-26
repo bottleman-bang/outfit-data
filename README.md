@@ -1,8 +1,9 @@
 # outfit-data
 
-"오늘 뭐 입지" 앱의 **뉴스·증시** 탭에 쓰는 데이터를 만드는 저장소예요.
+"모닝픽" 앱의 **뉴스·증시·Daily Up** 탭에 쓰는 데이터를 만드는 저장소예요.
 
-- `build.py` — 무료 공개 데이터만 모아서 `news.json`, `market.json` 을 만들어요 (파이썬 표준 라이브러리만 사용).
+- `build.py` — 무료 공개 데이터만 모아서 `news.json`, `market.json`, `daily.json` 을 만들어요 (파이썬 표준 라이브러리만 사용).
+- `daily.json` — 💬 Talk Pick(영어 질문 중급·중상급 + 단어·문법 해설·모범 답안·선생님 노트)과 🥄 AI 한 스푼을 매일 아침 6시(한국 시간) 이후 한 번 만들어요. 최근 14일치를 보관해요.
 - GitHub Actions가 15분마다 실행해서 결과를 **`data` 브랜치**에 올려요 (커밋 1개로 덮어써서 기록이 쌓이지 않아요).
 - 앱은 `https://raw.githubusercontent.com/bottleman-bang/outfit-data/data/market.json` 처럼 읽어요.
 
@@ -15,6 +16,8 @@
 | 경제 일정 | ForexFactory |
 | 뉴스 | Bloomberg·CNBC·FT·WSJ·MarketWatch·CoinDesk·Federal Reserve·The Economist RSS, Google 뉴스(Reuters 등 공신력 있는 매체만), 연합뉴스·매일경제 RSS |
 | 요약·번역 | 무료 번역 + 규칙 기반 요약 · (선택) 무료 Gemini API 키를 `GEMINI_API_KEY` 시크릿으로 넣으면 AI 요약 |
+| 경제노트·시장 해설·Talk Pick·AI 한 스푼 | 무료 Gemini API (`GEMINI_API_KEY` 시크릿) |
+| 영어 첨삭 (앱에서 실시간) | Pollinations 무료 공개 AI (키 없음, 한 곳에서 45초에 1번) |
 
 개인적인 비상업 용도예요. 기사 원문 저작권은 각 언론사에 있어요.
 
