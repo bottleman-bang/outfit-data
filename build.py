@@ -6,7 +6,7 @@ GitHub Actions가 15분마다 실행해서 out/ 폴더에 news.json, market.json
         alternative.me(코인 공포탐욕), ForexFactory(경제 일정), Nasdaq(실적 발표)
 - 뉴스: Bloomberg·CNBC·FT·WSJ·MarketWatch·CoinDesk·Fed·Economist RSS, Google 뉴스(Reuters 등 주제 검색),
         연합뉴스·매일경제 RSS
-- 요약·번역: GitHub Models(무료, GITHUB_TOKEN) → 안 되면 무료 번역 + 규칙 기반 요약
+- 요약·번역: (선택) 무료 Gemini API 키가 있으면 AI 요약 → 없으면 무료 번역 + 규칙 기반 요약
 표준 라이브러리만 사용해요 (설치 필요 없음).
 """
 import concurrent.futures as cf
@@ -633,23 +633,35 @@ def _gtx(texts):
 
 # ---------------- AI 요약 (GitHub Models, 무료) ----------------
 def ai_chat(prompt, max_tokens=3500):
-    tok = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_MODELS_TOKEN')
-    if not tok:
-        return None
-    body = json.dumps({'model': os.environ.get('AI_MODEL', 'openai/gpt-4.1-mini'), 'temperature': 0.4, 'max_tokens': max_tokens,
-                       'messages': [{'role': 'system', 'content': '너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 사실만 쓰고, 과장하지 말고, 투자 권유는 하지 마. 반드시 JSON만 출력해.'},
-                                    {'role': 'user', 'content': prompt}]}).encode()
-    for model in [os.environ.get('AI_MODEL', 'openai/gpt-4.1-mini'), 'openai/gpt-4o-mini']:
+    """AI 요약 (선택). 무료 Gemini API 키(GEMINI_API_KEY)가 있으면 사용, 없으면 건너뛰고 규칙 기반 요약을 써요."""
+    sysmsg = '너는 한국어로 글로벌 경제·증시 뉴스를 정리하는 애널리스트야. 사실만 쓰고, 과장하지 말고, 투자 권유는 하지 마. 반드시 JSON만 출력해.'
+    key = os.environ.get('GEMINI_API_KEY', '').strip()
+    if key:
+        for model in [os.environ.get('AI_MODEL') or 'gemini-2.5-flash', 'gemini-2.0-flash']:
+            try:
+                body = {'systemInstruction': {'parts': [{'text': sysmsg}]}, 'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+                        'generationConfig': {'temperature': 0.4, 'maxOutputTokens': max_tokens, 'responseMimeType': 'application/json'}}
+                txt = get(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={urllib.parse.quote(key)}',
+                          data=json.dumps(body).encode(), timeout=60, tries=1, headers={'Content-Type': 'application/json'})
+                content = json.loads(txt)['candidates'][0]['content']['parts'][0]['text']
+                m = re.search(r'\{.*\}', content, re.S)
+                if m:
+                    return json.loads(m.group(0))
+            except Exception as e:  # noqa
+                log('!! gemini', model, type(e).__name__, str(e)[:160])
+    # (예전) GitHub Models — 지금은 기본으로 쓰지 않아요. USE_GH_MODELS=1 일 때만 시도
+    tok = os.environ.get('GITHUB_TOKEN') if os.environ.get('USE_GH_MODELS') == '1' else None
+    if tok:
         try:
-            b = json.loads(body)
-            b['model'] = model
-            txt = get('https://models.github.ai/inference/chat/completions', data=json.dumps(b).encode(), timeout=90, tries=1,
+            b = {'model': 'openai/gpt-4.1-mini', 'temperature': 0.4, 'max_tokens': max_tokens,
+                 'messages': [{'role': 'system', 'content': sysmsg}, {'role': 'user', 'content': prompt}]}
+            txt = get('https://models.github.ai/inference/chat/completions', data=json.dumps(b).encode(), timeout=60, tries=1,
                       headers={'Authorization': f'Bearer {tok}', 'Content-Type': 'application/json', 'Accept': 'application/json'})
             content = json.loads(txt)['choices'][0]['message']['content']
             m = re.search(r'\{.*\}', content, re.S)
             return json.loads(m.group(0)) if m else None
         except Exception as e:  # noqa
-            log('!! ai', model, type(e).__name__, str(e)[:160])
+            log('!! gh models', type(e).__name__, str(e)[:160])
     return None
 
 
@@ -734,7 +746,7 @@ def finish_news(clusters, market):
     digest = market_digest(market) if market else []
     sig = hashlib.sha1(('|'.join(c['items'][0]['id'] for c in top_cl[:6]) + '|' + NOW.strftime('%Y%m%d%H') + str(NOW.minute // 30)).encode()).hexdigest()[:12]
     ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig else None
-    if not ai and os.environ.get('GITHUB_TOKEN'):
+    if not ai and (os.environ.get('GEMINI_API_KEY') or os.environ.get('USE_GH_MODELS') == '1'):
         lines = []
         for i, c in enumerate(clusters[:22]):
             h = c['items'][0]

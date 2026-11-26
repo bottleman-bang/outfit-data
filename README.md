@@ -14,7 +14,7 @@
 | 코인 | CoinGecko, Upbit, alternative.me(공포탐욕) |
 | 경제 일정 | ForexFactory |
 | 뉴스 | Bloomberg·CNBC·FT·WSJ·MarketWatch·CoinDesk·Federal Reserve·The Economist RSS, Google 뉴스(Reuters 등 공신력 있는 매체만), 연합뉴스·매일경제 RSS |
-| 요약·번역 | GitHub Models (GITHUB_TOKEN, 무료 한도) → 실패 시 무료 번역 + 규칙 기반 요약 |
+| 요약·번역 | 무료 번역 + 규칙 기반 요약 · (선택) 무료 Gemini API 키를 `GEMINI_API_KEY` 시크릿으로 넣으면 AI 요약 |
 
 개인적인 비상업 용도예요. 기사 원문 저작권은 각 언론사에 있어요.
 
