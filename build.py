@@ -808,6 +808,85 @@ def market_digest(m):
     return L
 
 
+# ======================================================================
+#  오늘의 경제노트 (하루 1번, 아침 6시 기준)
+# ======================================================================
+def edition_date():
+    return (NOW.astimezone(KST) - timedelta(hours=6)).date().isoformat()   # 6시가 지나면 새 노트
+
+
+def build_note(top, digest):
+    notes = CACHE.setdefault('notes', [])      # 최근 노트 전체 내용 (최신 먼저, 최대 8개)
+    hist = CACHE.setdefault('noteHist', [])    # 지금까지 다룬 주제 (반복 방지)
+    ed = edition_date()
+    if notes and notes[0].get('date') == ed:
+        return notes
+    if not os.environ.get('GEMINI_API_KEY', '').strip():
+        return notes
+    level = ['기초', '기초', '중급', '중급', '심화'][len(hist) % 5]
+    news = [f"[{x['id']}] ({CAT_KO.get(x['c'], x['c'])}) {x.get('tk') or x['t']} — {' '.join((x.get('sum') or [])[:3]) if isinstance(x.get('sum'), list) else ''}"
+            for x in top[:8]]
+    recent = [f"- {h['date']}: {h['title']} ({', '.join(h.get('kw', [])[:4])})" for h in hist[-45:]] or ['- (아직 없음)']
+    prompt = f"""너는 경제를 쉽고 정확하게 가르치는 선생님이야. 아래 오늘({ed})의 주요 뉴스와 시장 데이터를 보고 '오늘의 경제노트'를 만들어줘.
+독자는 경제 뉴스를 매일 읽고 싶은 일반인이야.
+
+[오늘 주요 뉴스]
+{chr(10).join(news)}
+
+[시장 데이터]
+{chr(10).join(digest) or '없음'}
+
+[최근 다룬 주제 — 같은 주제·같은 키워드 반복 금지]
+{chr(10).join(recent)}
+
+주제 고르는 법
+1) 오늘 뉴스 중 배경 지식이 있어야 제대로 이해되는 것이 있으면, 그 경제 원리·배경을 골라 (예: 관세와 금리의 관계, 금리가 오르면 채권 가격이 떨어지는 이유, 점도표 읽는 법, 공포지수(VIX) 참고법)
+2) 특별한 게 없으면 꼭 알아야 할 경제 상식 하나를 골라
+3) 오늘 목표 난이도: {level}  (기초: 용어·기본 원리 / 중급: 지표 해석·인과관계 / 심화: 여러 변수가 얽힌 메커니즘·정책 효과)
+
+작성 규칙
+- title: 호기심을 끄는 질문형 제목, 40자 이내 (예: "금리가 오르면 왜 채권 가격은 떨어질까?")
+- intro: 오늘 뉴스와 어떻게 연결되는지 1~2문장 (관련 뉴스가 없으면 왜 알아두면 좋은지)
+- chain: 원인→결과 흐름이 있으면 3~6단계의 짧은 구절 (각 15자 이내), 없으면 []
+- body: 3~6개 단락. 각 단락 2~3문장. 쉬운 말, 비유, 숫자 예시. 단계적으로 설명
+- example: 숫자나 일상 비유로 한 번 더 설명 (2~3문장)
+- takeaway: 뉴스·투자 볼 때 써먹을 한 줄 정리
+- keywords: 오늘 뉴스·주제와 관련된 용어 3~5개. desc는 쉬운 설명 1~2문장, tip은 뉴스나 시장에서 어떻게 참고하는지 1문장
+- quiz: 이해도를 확인하는 문제 1개. options 3개, answer는 정답 보기 번호(0부터), explain은 해설 1~2문장
+- related: 관련된 뉴스 id 목록 (없으면 [])
+- 정확한 내용만. 확정되지 않은 수치·사실은 쓰지 마. 투자 권유 금지. '~해요'체로 친근하게.
+
+JSON으로만 답해:
+{{"title": "", "level": "{level}", "intro": "", "chain": [], "body": [], "example": "", "takeaway": "",
+ "keywords": [{{"term": "", "desc": "", "tip": ""}}], "quiz": {{"q": "", "options": ["", "", ""], "answer": 0, "explain": ""}}, "related": []}}"""
+    res = ai_chat(prompt, max_tokens=6000)
+    if not isinstance(res, dict) or not res.get('title') or not isinstance(res.get('body'), list) or len(res['body']) < 2:
+        log('!! note failed')
+        return notes
+    S_ = lambda v, n=600: str(v or '').strip()[:n]
+    kws = [{'term': S_(k.get('term'), 40), 'desc': S_(k.get('desc'), 300), 'tip': S_(k.get('tip'), 200)}
+           for k in (res.get('keywords') or []) if isinstance(k, dict) and k.get('term') and k.get('desc')][:5]
+    q = res.get('quiz') if isinstance(res.get('quiz'), dict) else {}
+    opts = [S_(o, 120) for o in (q.get('options') or []) if S_(o)][:4]
+    try:
+        ans = int(q.get('answer', 0))
+    except Exception:
+        ans = 0
+    quiz = {'q': S_(q.get('q'), 200), 'options': opts, 'answer': ans if 0 <= ans < len(opts) else 0, 'explain': S_(q.get('explain'), 300)} if q.get('q') and len(opts) >= 2 else None
+    note = {'date': ed, 'level': res.get('level') if res.get('level') in ('기초', '중급', '심화') else level,
+            'title': S_(res['title'], 80), 'intro': S_(res.get('intro'), 300),
+            'chain': [S_(c, 30) for c in (res.get('chain') or []) if S_(c)][:6],
+            'body': [S_(b, 500) for b in res['body'] if S_(b)][:6], 'example': S_(res.get('example'), 400),
+            'takeaway': S_(res.get('takeaway'), 200), 'keywords': kws, 'quiz': quiz,
+            'related': [str(r) for r in (res.get('related') or [])][:4]}
+    notes.insert(0, note)
+    del notes[8:]
+    hist.append({'date': ed, 'title': note['title'], 'kw': [k['term'] for k in kws]})
+    del hist[:-150]
+    log('note ok:', note['title'])
+    return notes
+
+
 def finish_news(clusters, market):
     # 화면용 기사 정리
     def item_out(x, n=1):
@@ -929,7 +1008,8 @@ JSON으로만 답해:
         if len(store) > keep + 200:
             for k in list(store)[:len(store) - keep]:
                 store.pop(k, None)
-    return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai) or any(x.get('sumType') == 'ai' for x in top),
+    notes = safe(lambda: build_note(top, digest), CACHE.get('notes', []), 'note')
+    return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai) or any(x.get('sumType') == 'ai' for x in top), 'notes': notes,
             'brief': (ai or {}).get('news_brief') or [], 'marketBrief': (ai or {}).get('market_brief') or [], 'digest': digest,
             'top': top, 'cats': per_cat, 'catNames': CAT_KO}
 
