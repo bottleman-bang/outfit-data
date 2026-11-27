@@ -1,29 +1,62 @@
 name: 뉴스·증시 데이터 업데이트
+# 약 15분 간격으로 계속 돌아요.
+#  - 실행이 끝날 때 다음 실행을 직접 예약해요 (맨 아래 '다음 업데이트 예약').
+#  - 예약된 실행은 'cadence' 환경의 대기 시간(14분)만큼 기다렸다가 시작해요. (기다리는 동안은 서버를 쓰지 않아요)
+#  - GitHub 예약 실행(cron)은 자주 밀리거나 빠져서 (처음 12시간 동안 1번만 돈 적도 있어요),
+#    반복이 끊겼을 때 다시 이어 주는 예비용으로만 둬요.
+# 대기 환경 만들기(처음 한 번): gh api -X PUT repos/<저장소>/environments/cadence -F wait_timer=14
 on:
   schedule:
-    - cron: '*/15 * * * *'   # 15분마다
+    - cron: '7 * * * *'      # 예비: 1시간에 한 번 (반복이 끊겼으면 다시 시작)
   workflow_dispatch:          # 수동 실행 버튼
+    inputs:
+      chain:
+        description: '자동 반복 실행 (14분 기다렸다 시작)'
+        type: boolean
+        default: false
 permissions:
   contents: write   # data 브랜치에 결과 올리기
-  actions: write    # 예약 실행이 꺼지지 않게 유지
+  actions: write    # 다음 실행 예약 · 예약 실행이 꺼지지 않게 유지
 concurrency:
   group: update-data
   cancel-in-progress: false
 jobs:
+  wait:
+    if: ${{ inputs.chain == true }}
+    runs-on: ubuntu-latest
+    environment: cadence      # 여기서 14분 기다려요
+    steps:
+      - run: echo "다음 업데이트 시간이 됐어요"
   update:
+    needs: wait
+    if: ${{ always() && needs.wait.result != 'failure' && needs.wait.result != 'cancelled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: 방금 업데이트했으면 건너뛰기 (예비 실행과 겹칠 때)
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh api "repos/${{ github.repository }}/commits/data" --jq '.commit.committer.date' 2>/dev/null || true)
+          age=999999
+          if [ -n "$last" ]; then age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) )); fi
+          echo "마지막 업데이트: ${age}초 전"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$age" -lt 600 ]; then echo "skip=1" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/checkout@v4
+        if: steps.fresh.outputs.skip != '1'
       - name: 이전 캐시 가져오기 (번역·요약 재사용)
+        if: steps.fresh.outputs.skip != '1'
         run: |
           mkdir -p out
           curl -sfL "https://raw.githubusercontent.com/${{ github.repository }}/data/cache.json" -o out/cache.json || echo '{}' > out/cache.json
       - name: 뉴스·증시 데이터 만들기
+        if: steps.fresh.outputs.skip != '1'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # (선택) 넣으면 AI 요약이 켜져요
         run: python3 build.py out
       - name: data 브랜치에 올리기 (기록이 쌓이지 않게 1개 커밋으로 덮어쓰기)
+        if: steps.fresh.outputs.skip != '1'
         run: |
           cd out
           git init -q -b data
@@ -32,7 +65,18 @@ jobs:
           git add -A
           git commit -qm "data $(date -u +%FT%TZ)"
           git push -fq "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
+      - name: 다음 업데이트 예약 (14분 뒤 시작)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 이미 기다리는 실행이 있으면 또 만들지 않아요 (반복이 두 줄로 늘어나지 않게)
+          n=$(gh run list -R "${{ github.repository }}" --workflow update.yml --limit 20 --json databaseId,status \
+               --jq '[.[] | select(.status != "completed" and .databaseId != ${{ github.run_id }})] | length')
+          if [ "$n" = "0" ]; then gh workflow run update.yml -R "${{ github.repository }}" -f chain=true && echo "다음 실행을 예약했어요"
+          else echo "이미 다음 실행이 기다리고 있어요"; fi
       - name: 예약 실행 유지 (60일 비활성 자동 중지 방지)
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update.yml/enable" || true
