@@ -1,5 +1,6 @@
 name: 뉴스·증시 데이터 업데이트
-# 약 15분 간격으로 계속 돌아요.
+# 시간표(한국 시간): 뉴스 8·12·16시 / 증시 7시(미국 중심)·17시(한국 중심) — build.py의 NEWS_SLOTS·MARKET_SLOTS
+# 약 15분 간격으로 깨어나서, 정해진 시각이 지났을 때만 새로 만들어요(아니면 바로 끝나요).
 #  - 실행이 끝날 때 다음 실행을 직접 예약해요 (맨 아래 '다음 업데이트 예약').
 #  - 예약된 실행은 'cadence' 환경의 대기 시간(14분)만큼 기다렸다가 시작해요. (기다리는 동안은 서버를 쓰지 않아요)
 #  - GitHub 예약 실행(cron)은 자주 밀리거나 빠져서 (처음 12시간 동안 1번만 돈 적도 있어요),
@@ -14,6 +15,10 @@ on:
         description: '자동 반복 실행 (14분 기다렸다 시작)'
         type: boolean
         default: false
+      force:
+        description: '시간표와 상관없이 지금 만들기 (all / news / market, 비우면 시간표대로)'
+        type: string
+        default: ''
 permissions:
   contents: write   # data 브랜치에 결과 올리기
   actions: write    # 다음 실행 예약 · 예약 실행이 꺼지지 않게 유지
@@ -45,18 +50,20 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$age" -lt 600 ]; then echo "skip=1" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/checkout@v4
         if: steps.fresh.outputs.skip != '1'
-      - name: 이전 캐시 가져오기 (번역·요약 재사용)
+      - name: 이전 결과 가져오기 (시간이 안 된 파일은 그대로 두려고)
         if: steps.fresh.outputs.skip != '1'
         run: |
           mkdir -p out
           curl -sfL "https://raw.githubusercontent.com/${{ github.repository }}/data/cache.json" -o out/cache.json || echo '{}' > out/cache.json
+          for f in news market daily; do curl -sfL "https://raw.githubusercontent.com/${{ github.repository }}/data/$f.json" -o out/$f.json || rm -f out/$f.json; done
       - name: 뉴스·증시 데이터 만들기
         if: steps.fresh.outputs.skip != '1'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # (선택) 넣으면 AI 요약이 켜져요
+          FORCE: ${{ inputs.force }}
         run: python3 build.py out
       - name: data 브랜치에 올리기 (기록이 쌓이지 않게 1개 커밋으로 덮어쓰기)
-        if: steps.fresh.outputs.skip != '1'
+        if: steps.fresh.outputs.skip != '1' && hashFiles('out/.skip') == ''
         run: |
           cd out
           git init -q -b data

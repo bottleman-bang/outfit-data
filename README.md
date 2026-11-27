@@ -4,7 +4,7 @@
 
 - `build.py` — 무료 공개 데이터만 모아서 `news.json`, `market.json`, `daily.json` 을 만들어요 (파이썬 표준 라이브러리만 사용).
 - `daily.json` — 💬 Talk Pick(영어 질문 중급·중상급 + 단어·문법 해설·모범 답안·선생님 노트)과 🥄 AI 한 스푼을 매일 아침 6시(한국 시간) 이후 한 번 만들어요. 최근 14일치를 보관해요.
-- GitHub Actions가 약 15분마다 실행해서 결과를 **`data` 브랜치**에 올려요 (커밋 1개로 덮어써서 기록이 쌓이지 않아요).
+- 뉴스는 8·12·16시, 증시는 7시(미국 증시 중심)·17시(한국 증시 중심)에 새로 만들어서 결과를 **`data` 브랜치**에 올려요 (커밋 1개로 덮어써서 기록이 쌓이지 않아요).
   - GitHub의 예약 실행(cron)은 자주 밀리거나 빠져서, 실행이 끝날 때 **다음 실행을 직접 예약**하고 `cadence` 환경의 대기 시간(14분)만큼 기다렸다 시작하는 방식이에요. cron은 1시간마다 끊긴 반복을 다시 잇는 예비용이에요.
   - 새 저장소에 설치할 때는 대기 환경을 한 번 만들어 주세요: `gh api -X PUT repos/<저장소>/environments/cadence -F wait_timer=14` (최신 설정 파일: `setup/update.yml`)
 - 앱은 `https://raw.githubusercontent.com/bottleman-bang/outfit-data/data/market.json` 처럼 읽어요.

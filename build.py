@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """오늘 뭐 입지 — 뉴스·증시 데이터 만들기 (무료 공개 데이터만 사용)
 
-GitHub Actions가 15분마다 실행해서 out/ 폴더에 news.json, market.json 을 만들어요.
+GitHub Actions가 15분마다 깨어나서, 뉴스는 8·12·16시 · 증시는 7시(미국 중심)·17시(한국 중심)에 out/ 폴더를 새로 만들어요.
 - 증시: 네이버 증권(국내·해외 지수, 환율, 금리, 원자재, 순위), Nasdaq(미국 종목), CoinGecko·Upbit(코인),
         alternative.me(코인 공포탐욕), ForexFactory(경제 일정), Nasdaq(실적 발표)
 - 뉴스: Bloomberg·CNBC·FT·WSJ·MarketWatch·CoinDesk·Fed·Economist RSS, Google 뉴스(Reuters 등 주제 검색),
@@ -97,6 +97,20 @@ def load_prev(name):
 CACHE = load_prev('cache.json') or {}
 CACHE.setdefault('tr', {})   # 번역 캐시 {hash: 한국어 제목}
 CACHE.setdefault('ai', {})   # AI 요약 캐시
+
+# ---------------- 업데이트 시간표 (한국 시간) ----------------
+# 뉴스: 8·12·16시 / 증시: 7시(밤사이 미국 증시 중심) · 17시(오늘 한국 증시 중심)
+# 워크플로는 15분마다 깨어나지만, 정해진 시각이 지났을 때만 새로 만들어요. (FORCE=all|news|market 이면 바로)
+NEWS_SLOTS = [8, 12, 16]
+MARKET_SLOTS = {7: 'us', 17: 'kr'}
+FORCE = os.environ.get('FORCE', '').strip()
+
+
+def due_slot(hours):
+    now = NOW.astimezone(KST)
+    cands = [now.replace(hour=h, minute=0, second=0, microsecond=0) - timedelta(days=d) for h in hours for d in (0, 1)]
+    s = max(c for c in cands if c <= now)
+    return s.strftime('%Y-%m-%d %H'), s.hour
 
 
 # ======================================================================
@@ -764,6 +778,66 @@ def fmt_pct(v):
     return '-' if v is None else f'{v:+.2f}%'
 
 
+WD_KO = '월화수목금토일'
+
+
+def market_session(m):
+    """미국·한국 증시가 '직전 거래일'에 실제로 열렸는지 (주말·공휴일 판단) — 지수의 마지막 거래 시각으로"""
+    now = NOW.astimezone(KST)
+    W = {x['id']: x for x in m.get('world', [])}
+    K = {x['id']: x for x in m['kr'].get('indices', [])}
+    def d(x):
+        try: return datetime.fromisoformat(x['at']).date()
+        except Exception: return None
+    us_d, kr_d = d(W.get('.INX') or {}), d(K.get('KOSPI') or {})
+    return {'us_last': us_d.isoformat() if us_d else None, 'kr_last': kr_d.isoformat() if kr_d else None,
+            'us_fresh': bool(us_d and us_d >= now.date() - timedelta(days=1)),   # 7시 기준: 어젯밤(미국 날짜로 어제) 장이 열렸나
+            'kr_fresh': bool(kr_d and kr_d == now.date())}                       # 17시 기준: 오늘 한국 장이 열렸나
+
+
+def build_market_ai(m, focus, news):
+    """증시 분석 (AI). focus='us'(아침 7시) 또는 'kr'(오후 5시). 장이 쉰 날엔 주간 정리·다음 거래일 관전 포인트로"""
+    now = NOW.astimezone(KST)
+    ses = market_session(m)
+    dname = lambda iso: f"{iso[5:7]}/{iso[8:10]}({WD_KO[datetime.fromisoformat(iso).weekday()]})" if iso else '알 수 없음'
+    if focus == 'us':
+        role = '밤사이 마감한 미국 증시를 중심으로 (원인 → 업종·대형주 → 금리·달러·원자재·코인 → 오늘 한국 증시에 줄 영향 순서)'
+        state = (f"미국 증시는 직전 거래일 {dname(ses['us_last'])}에 정상 마감했어." if ses['us_fresh'] else
+                 f"미국 증시는 {dname(ses['us_last'])} 이후 휴장(주말 또는 공휴일)이라 밤사이 새 거래가 없었어. "
+                 "지난 거래일 결과는 짧게 되짚고, 휴장 동안 나온 뉴스와 다음 거래일·이번 주에 볼 일정 위주로 써줘. 새 거래가 있었던 것처럼 쓰지 마.")
+    else:
+        role = '오늘 마감한 한국 증시를 중심으로 (코스피·코스닥 → 외국인·기관·개인 수급 → 업종·대형주 → 환율 → 내일 볼 것 순서)'
+        state = (f"한국 증시는 오늘 {dname(ses['kr_last'])} 정상 마감했어." if ses['kr_fresh'] else
+                 f"오늘 한국 증시는 휴장(주말 또는 공휴일)이야. 마지막 거래일은 {dname(ses['kr_last'])}. "
+                 "지난 거래일을 짧게 정리하고, 그사이 해외 시장 흐름과 다음 거래일 관전 포인트 위주로 써줘. 오늘 거래가 있었던 것처럼 쓰지 마.")
+    heads = [f"- {x.get('tk') or x['t']}" for x in ((news or {}).get('top') or [])[:10]]
+    cal = [f"- {c.get('t', '')[:16]} {c.get('cc', '')} {c.get('ko') or c.get('en', '')} (예상 {c.get('f') or '-'}, 이전 {c.get('p') or '-'})"
+           for c in (m.get('calendar') or []) if c.get('t', '') >= now.isoformat()[:16] and c.get('imp') == 'High'][:6]
+    prompt = f"""지금은 {now:%m월 %d일}({WD_KO[now.weekday()]}) {now:%H:%M} KST야. {role} 오늘의 증시 분석을 써줘.
+{state}
+
+[시장 데이터]
+{chr(10).join(market_digest(m)) or '없음'}
+
+[주요 뉴스 제목]
+{chr(10).join(heads) or '없음'}
+
+[앞으로 나올 주요 경제 일정]
+{chr(10).join(cal) or '없음'}
+
+JSON으로만 답해 (친근한 '~해요'체, 숫자는 데이터 그대로):
+{{
+ "market_brief": ["시장 한눈에 3~4개. 각 1문장. 원인과 의미를 짧게"],
+ "market_commentary": {{"headline": "오늘 시장을 한마디로 (30자 이내)", "paragraphs": ["흐름을 엮어 설명하는 단락 2~4개 (각 2~3문장)"], "watch": ["앞으로 주목할 일정·변수 2~3개 (각 1문장)"]}}
+}}"""
+    ai = ai_chat(prompt)
+    if not ai or not isinstance(ai.get('market_brief'), list):
+        return None
+    com = ai.get('market_commentary') if isinstance(ai.get('market_commentary'), dict) else None
+    log('market ai ok', focus, 'us_fresh' if ses['us_fresh'] else 'us_closed', 'kr_fresh' if ses['kr_fresh'] else 'kr_closed')
+    return {'brief': [str(x) for x in ai['market_brief'] if x][:5], 'commentary': com, 'session': ses}
+
+
 def market_digest(m):
     """시장 데이터를 한 줄씩 요약 (AI 입력 + AI 없을 때 화면용)"""
     L = []
@@ -1196,7 +1270,7 @@ def finish_news(clusters, market):
 
     # (4) 핵심 요약 + 제목 번역 (1시간에 한 번, 주요 뉴스가 바뀌면)
     sig = hashlib.sha1(('|'.join(c['items'][0]['id'] for c in top_cl[:6]) + '|' + NOW.strftime('%Y%m%d%H')).encode()).hexdigest()[:12]
-    ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig and 'market_commentary' in CACHE['ai'] else None
+    ai = CACHE['ai'] if CACHE['ai'].get('sig') == sig and 'news_brief' in CACHE['ai'] else None
     if not ai and have_ai:
         lines = []
         for c in clusters[:22]:
@@ -1205,7 +1279,7 @@ def finish_news(clusters, market):
             lines.append(f"[{h['id']}] ({CAT_KO.get(h['c'], h['c'])}, {h['s']}, {c['n']}개 매체) {h['t']}" +
                          (f" — {' '.join(s_['lines'][:2])}" if s_ else (f" — {h['d'][:160]}" if h['d'] else '')))
         untranslated = [f"{k}: {v}" for k, v in need.items() if k not in tr][:70]
-        prompt = f"""지금({NOW.astimezone(KST):%m월 %d일 %H:%M} KST) 시장 데이터와 주요 뉴스야.
+        prompt = f"""지금({NOW.astimezone(KST):%m월 %d일 %H:%M} KST) 주요 뉴스야. (시장 데이터는 참고용)
 
 [시장 데이터]
 {chr(10).join(digest) or '없음'}
@@ -1218,9 +1292,7 @@ def finish_news(clusters, market):
 
 JSON으로만 답해:
 {{
- "news_brief": ["오늘 꼭 알아야 할 글로벌 경제·증시 핵심 3~5개. 각 1문장, 숫자·주체를 구체적으로"],
- "market_brief": ["시장 데이터를 해석한 요약 3~4개. 각 1문장. 원인과 의미를 짧게"],
- "market_commentary": {{"headline": "오늘 시장을 한마디로 (30자 이내)", "paragraphs": ["왜 이렇게 움직였는지 뉴스와 데이터를 엮어 설명하는 단락 2~4개 (각 2~3문장, 미국→한국→환율·금리·원자재·코인 흐름)"], "watch": ["앞으로 주목할 일정·변수 2~3개 (각 1문장)"]}},
+ "news_brief": ["오늘 꼭 알아야 할 글로벌 경제·증시 뉴스 핵심 3~5개. 각 1문장, 숫자·주체를 구체적으로"],
  "titles": {{"id": "한국어 제목"}}
 }}"""
         ai = ai_chat(prompt)
@@ -1250,32 +1322,59 @@ JSON으로만 답해:
                 store.pop(k, None)
     notes = safe(lambda: build_note(top, digest), CACHE.get('notes', []), 'note')
     return {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'), 'ai': bool(ai) or any(x.get('sumType') == 'ai' for x in top), 'notes': notes,
-            'brief': (ai or {}).get('news_brief') or [], 'marketBrief': (ai or {}).get('market_brief') or [], 'digest': digest,
-            'commentary': (ai or {}).get('market_commentary') if isinstance((ai or {}).get('market_commentary'), dict) else None,
+            'brief': (ai or {}).get('news_brief') or [], 'marketBrief': (market or {}).get('brief') or [], 'digest': digest,
+            'commentary': (market or {}).get('commentary'), 'newsAi': bool(ai),
             'top': top, 'cats': per_cat, 'catNames': CAT_KO}
 
 
 def main():
     t0 = time.time()
-    market = safe(build_market, None, 'market')
-    if market:
-        with open(os.path.join(OUT, 'market.json'), 'w', encoding='utf-8') as f:
-            json.dump(market, f, ensure_ascii=False, separators=(',', ':'))
-    clusters = safe(build_news, [], 'news')
-    if clusters:
-        news = safe(lambda: finish_news(clusters, market), None, 'finish news')
-        if news:
-            if market:  # 시장 요약은 증시 화면에서도 쓰도록
-                market['brief'] = news['marketBrief']
-                market['commentary'] = news.get('commentary')
-                market['digest'] = news['digest']
-                market['ai'] = news['ai']
-                with open(os.path.join(OUT, 'market.json'), 'w', encoding='utf-8') as f:
-                    json.dump(market, f, ensure_ascii=False, separators=(',', ':'))
-            with open(os.path.join(OUT, 'news.json'), 'w', encoding='utf-8') as f:
-                json.dump(news, f, ensure_ascii=False, separators=(',', ':'))
-    else:
-        news = None
+    slots = CACHE.setdefault('slots', {})
+    nk, nh = due_slot(NEWS_SLOTS)
+    mk, mh = due_slot(list(MARKET_SLOTS))
+    do_news = FORCE in ('all', 'news') or slots.get('news') != nk
+    do_market = FORCE in ('all', 'market') or slots.get('market') != mk
+    if not (do_news or do_market):
+        log(f'nothing due (news {slots.get("news")}, market {slots.get("market")})')
+        open(os.path.join(OUT, '.skip'), 'w').close()   # 워크플로가 올리기를 건너뛰어요
+        return
+    have_ai = bool(os.environ.get('GEMINI_API_KEY', '').strip())
+    prev_news, market = load_prev('news.json'), load_prev('market.json')
+
+    if do_market:
+        focus = MARKET_SLOTS[mh]
+        fresh = safe(build_market, None, 'market')
+        if fresh:
+            res = safe(lambda: build_market_ai(fresh, focus, prev_news), None, 'market ai') if have_ai else None
+            fresh.update({'focus': focus, 'slot': mk, 'digest': market_digest(fresh), 'ai': bool(res),
+                          'brief': (res or {}).get('brief') or [], 'commentary': (res or {}).get('commentary'),
+                          'session': (res or {}).get('session') or market_session(fresh)})
+            market = fresh
+            tries = slots.get('marketTry', 0) + 1
+            if res or not have_ai or tries >= 3:     # AI가 실패하면 다음 실행(15분 뒤)에 두 번 더 시도
+                slots['market'], slots['marketTry'] = mk, 0
+            else:
+                slots['marketTry'] = tries
+            with open(os.path.join(OUT, 'market.json'), 'w', encoding='utf-8') as f:
+                json.dump(market, f, ensure_ascii=False, separators=(',', ':'))
+
+    news = prev_news
+    if do_news:
+        clusters = safe(build_news, [], 'news')
+        if clusters:
+            fresh = safe(lambda: finish_news(clusters, market), None, 'finish news')
+            if fresh:
+                news = fresh
+                tries = slots.get('newsTry', 0) + 1
+                if fresh.get('newsAi') or not have_ai or tries >= 3:
+                    slots['news'], slots['newsTry'] = nk, 0
+                else:
+                    slots['newsTry'] = tries
+    if news and market:   # 뉴스 파일의 시장 요약은 증시 분석과 같게
+        news.update({'marketBrief': market.get('brief') or [], 'commentary': market.get('commentary'), 'digest': market.get('digest') or []})
+    if news:
+        with open(os.path.join(OUT, 'news.json'), 'w', encoding='utf-8') as f:
+            json.dump(news, f, ensure_ascii=False, separators=(',', ':'))
     daily = safe(lambda: build_daily(news), None, 'daily') or {'updated': NOW.astimezone(KST).isoformat(timespec='minutes'),
                                                                  'talks': CACHE.get('talks', []), 'tips': CACHE.get('tips', [])}
     with open(os.path.join(OUT, 'daily.json'), 'w', encoding='utf-8') as f:
@@ -1283,7 +1382,7 @@ def main():
     with open(os.path.join(OUT, 'cache.json'), 'w', encoding='utf-8') as f:
         json.dump(CACHE, f, ensure_ascii=False, separators=(',', ':'))
     with open(os.path.join(OUT, 'log.txt'), 'w', encoding='utf-8') as f:
-        f.write(f'{NOW.astimezone(KST).isoformat()}\n' + '\n'.join(LOG))
+        f.write(f'{NOW.astimezone(KST).isoformat()}\nnews {"built " + nk if do_news else "kept"} · market {"built " + mk if do_market else "kept"}\n' + '\n'.join(LOG))
     log(f'done in {time.time() - t0:.1f}s')
 
 
