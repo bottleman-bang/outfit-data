@@ -1,0 +1,23 @@
+2026-11-28T17:14:15.662784+09:00
+news kept · market built 2026-11-28 17
+market built in 5.5s
+!! gemini gemini-3.8-flash 503 {
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}
+
+!! gemini gemini-3.8-flash 503 {
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}
+
+!! gemini gemini-flash-latest TimeoutError The read operation timed out
+!! gemini gemini-flash-latest TimeoutError The read operation timed out
+gemini ok gemini-3.5-flash-lite
+market ai ok kr us_fresh kr_closed
